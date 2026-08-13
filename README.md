@@ -14,3 +14,11 @@
 飞书开放平台重定向 URL 为：`https://你的域名/api/feishu/callback`。
 
 当前版本只验证 OAuth 授权并回跳 Motion Note。后续版本会增加加密的令牌持久化和飞书文档读取。
+
+## 机器人事件回调
+
+飞书「事件与回调」的 Webhook 请求地址为：
+
+`https://你的域名/api/feishu/events`
+
+订阅事件：`im.message.receive_v1`（接收消息）。当前接口已支持 URL 验证与消息确认；自动读取文档会在加密令牌和训练记录存储配置完成后启用。
