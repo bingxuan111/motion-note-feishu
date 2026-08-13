@@ -10,12 +10,15 @@ if (!appId || !appSecret) {
   process.exit(1);
 }
 
-// Railway probes this endpoint; the Feishu event channel itself is a persistent
-// outbound WebSocket connection, so no public webhook URL is required.
 const server = http.createServer((request, response) => {
   if (request.url === "/health") {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: true, service: "motion-note-feishu-long-connection" }));
+    response.end(
+      JSON.stringify({
+        ok: true,
+        service: "motion-note-feishu-long-connection",
+      }),
+    );
     return;
   }
 
@@ -24,42 +27,69 @@ const server = http.createServer((request, response) => {
 });
 
 server.listen(port, () => {
-  console.log(`Motion Note listener health check running on :${port}`);
+  console.log(`Motion Note listener running on :${port}`);
 });
 
-const baseConfig = { appId, appSecret };
-const client = new Lark.Client(baseConfig);
+function extractDocumentId(text) {
+  if (typeof text !== "string") return null;
+  const match = text.match(/(?:docx|docs)\/([A-Za-z0-9_-]+)/i);
+  return match?.[1] || null;
+}
+
+async function getTenantAccessToken() {
+  const response = await fetch(
+    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+    },
+  );
+
+  const result = await response.json();
+  if (!response.ok || result.code !== 0 || !result.tenant_access_token) {
+    throw new Error(`tenant token failed: ${result.msg || response.status}`);
+  }
+  return result.tenant_access_token;
+}
+
+async function readDocument(documentId) {
+  const token = await getTenantAccessToken();
+  const response = await fetch(
+    `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentId)}/raw_content`,
+    { headers: { authorization: `Bearer ${token}` } },
+  );
+
+  const result = await response.json();
+  if (!response.ok || result.code !== 0) {
+    throw new Error(`document read failed: ${result.msg || response.status}`);
+  }
+  return String(result.data?.content || "").trim();
+}
+
+function compactSummary(content) {
+  const text = content
+    .replace(/[#*_>`]/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (!text) return "文档已读取，但暂未发现可提炼的正文。";
+  return text.length > 900 ? `${text.slice(0, 900)}…` : text;
+}
+
+const client = new Lark.Client({ appId, appSecret });
+
+async function reply(messageId, text) {
+  await client.im.v1.message.reply({
+    path: { message_id: messageId },
+    data: {
+      msg_type: "text",
+      content: JSON.stringify({ text }),
+    },
+  });
+}
+
 const dispatcher = new Lark.EventDispatcher({}).register({
   "im.message.receive_v1": async (data) => {
     const message = data?.message;
-    if (!message) return;
-
-    console.log("Motion Note received message", {
-      messageId: message.message_id,
-      messageType: message.message_type,
-      chatId: message.chat_id,
-    });
-
-    // Phase 1: prove that the persistent event channel is working. A later
-    // phase will extract Feishu document links, read documents using the user's
-    // OAuth token, and store a structured workout record.
-    if (message.message_type === "text") {
-      await client.im.v1.message.reply({
-        path: { message_id: message.message_id },
-        data: {
-          msg_type: "text",
-          content: JSON.stringify({
-            text: "已收到。Motion Note 正在准备导入这份训练记录。",
-          }),
-        },
-      });
-    }
-  },
-});
-
-const wsClient = new Lark.WSClient({
-  ...baseConfig,
-  loggerLevel: Lark.LoggerLevel.info,
-});
-
-wsClient.start({ eventDispatcher: dispatcher });
+    if (!message || message.message_type !== "text
