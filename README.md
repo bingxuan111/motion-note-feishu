@@ -22,3 +22,4 @@
 `https://你的域名/api/feishu/events`
 
 订阅事件：`im.message.receive_v1`（接收消息）。当前接口已支持 URL 验证与消息确认；自动读取文档会在加密令牌和训练记录存储配置完成后启用。
+Webhook deployment enabled.
