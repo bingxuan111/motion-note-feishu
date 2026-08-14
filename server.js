@@ -13,12 +13,7 @@ if (!appId || !appSecret) {
 const server = http.createServer((request, response) => {
   if (request.url === "/health") {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(
-      JSON.stringify({
-        ok: true,
-        service: "motion-note-feishu-long-connection",
-      }),
-    );
+    response.end(JSON.stringify({ ok: true, service: "motion-note-feishu" }));
     return;
   }
 
@@ -30,10 +25,18 @@ server.listen(port, () => {
   console.log(`Motion Note listener running on :${port}`);
 });
 
-function extractDocumentId(text) {
+const client = new Lark.Client({ appId, appSecret });
+
+function extractDocumentReference(text) {
   if (typeof text !== "string") return null;
-  const match = text.match(/(?:docx|docs)\/([A-Za-z0-9_-]+)/i);
-  return match?.[1] || null;
+
+  const match = text.match(/\/(docx|docs|wiki)\/([A-Za-z0-9_-]+)/i);
+  if (!match) return null;
+
+  return {
+    kind: match[1].toLowerCase(),
+    token: match[2],
+  };
 }
 
 async function getTenantAccessToken() {
@@ -47,37 +50,73 @@ async function getTenantAccessToken() {
   );
 
   const result = await response.json();
+
   if (!response.ok || result.code !== 0 || !result.tenant_access_token) {
     throw new Error(`tenant token failed: ${result.msg || response.status}`);
   }
+
   return result.tenant_access_token;
 }
 
-async function readDocument(documentId) {
-  const token = await getTenantAccessToken();
+async function resolveDocumentId(reference) {
+  if (reference.kind !== "wiki") {
+    return reference.token;
+  }
+
+  const accessToken = await getTenantAccessToken();
+
   const response = await fetch(
-    `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentId)}/raw_content`,
-    { headers: { authorization: `Bearer ${token}` } },
+    `https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(reference.token)}`,
+    {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+    },
   );
 
   const result = await response.json();
+  const node = result.data?.node;
+
+  if (!response.ok || result.code !== 0 || !node?.obj_token) {
+    throw new Error(`wiki lookup failed: ${result.msg || response.status}`);
+  }
+
+  if (node.obj_type !== "docx") {
+    throw new Error(`unsupported wiki document type: ${node.obj_type}`);
+  }
+
+  return node.obj_token;
+}
+
+async function readDocument(documentId) {
+  const accessToken = await getTenantAccessToken();
+
+  const response = await fetch(
+    `https://open.feishu.cn/open-apis/docx/v1/documents/${encodeURIComponent(documentId)}/raw_content`,
+    {
+      headers: { authorization: `Bearer ${accessToken}` },
+    },
+  );
+
+  const result = await response.json();
+
   if (!response.ok || result.code !== 0) {
     throw new Error(`document read failed: ${result.msg || response.status}`);
   }
+
   return String(result.data?.content || "").trim();
 }
 
 function compactSummary(content) {
-  const text = content
+  const normalized = content
     .replace(/[#*_>`]/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  if (!text) return "文档已读取，但暂未发现可提炼的正文。";
-  return text.length > 900 ? `${text.slice(0, 900)}…` : text;
+  if (!normalized) return "文档已读取，但暂未发现可展示的正文。";
+  return normalized.length > 1200 ? `${normalized.slice(0, 1200)}…` : normalized;
 }
-
-const client = new Lark.Client({ appId, appSecret });
 
 async function reply(messageId, text) {
   await client.im.v1.message.reply({
@@ -101,12 +140,12 @@ const dispatcher = new Lark.EventDispatcher({}).register({
       rawContent,
     });
 
-    const documentId = extractDocumentId(rawContent);
+    const reference = extractDocumentReference(rawContent);
 
-    if (!documentId) {
+    if (!reference) {
       await reply(
         message.message_id,
-        "已收到训练文档卡片，但还没有识别到文档地址。我正在记录它的格式，稍后再试一次。",
+        "请直接发送私教课飞书文档链接，我会按原文导入训练计划。",
       );
       return;
     }
@@ -114,7 +153,13 @@ const dispatcher = new Lark.EventDispatcher({}).register({
     await reply(message.message_id, "已识别到训练文档，正在读取原计划…");
 
     try {
+      const documentId = await resolveDocumentId(reference);
       const content = await readDocument(documentId);
+
+      console.log("Motion Note imported document", {
+        documentId,
+        characters: content.length,
+      });
 
       await reply(
         message.message_id,
@@ -125,7 +170,7 @@ const dispatcher = new Lark.EventDispatcher({}).register({
 
       await reply(
         message.message_id,
-        "已识别到文档，但暂时无法读取正文。请确认文档已分享给 Motion Note，且已开通“查看新版文档”权限。",
+        "我识别到了文档，但暂时无法读取正文。请确认文档已分享给 Motion Note，并检查“查看知识库”和“查看新版文档”权限已发布。",
       );
     }
   },
