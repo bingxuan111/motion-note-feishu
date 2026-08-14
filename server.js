@@ -92,4 +92,4 @@ async function reply(messageId, text) {
 const dispatcher = new Lark.EventDispatcher({}).register({
   "im.message.receive_v1": async (data) => {
     const message = data?.message;
-    if (!message || message.message_type !== "text
+    if (!message || message.message_type !== "text") return;
