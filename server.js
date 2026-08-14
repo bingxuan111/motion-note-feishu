@@ -92,6 +92,49 @@ async function reply(messageId, text) {
 const dispatcher = new Lark.EventDispatcher({}).register({
   "im.message.receive_v1": async (data) => {
     const message = data?.message;
-  if (!message) return;
+    if (!message) return;
 
-const text = message.content || "";
+    const rawContent = message.content || "";
+    console.log("Motion Note received message", {
+      messageId: message.message_id,
+      messageType: message.message_type,
+      rawContent,
+    });
+
+    const documentId = extractDocumentId(rawContent);
+
+    if (!documentId) {
+      await reply(
+        message.message_id,
+        "已收到训练文档卡片，但还没有识别到文档地址。我正在记录它的格式，稍后再试一次。",
+      );
+      return;
+    }
+
+    await reply(message.message_id, "已识别到训练文档，正在读取原计划…");
+
+    try {
+      const content = await readDocument(documentId);
+
+      await reply(
+        message.message_id,
+        `训练计划已读取，将按原文执行：\n\n${compactSummary(content)}`,
+      );
+    } catch (error) {
+      console.error("Motion Note document import failed", error);
+
+      await reply(
+        message.message_id,
+        "已识别到文档，但暂时无法读取正文。请确认文档已分享给 Motion Note，且已开通“查看新版文档”权限。",
+      );
+    }
+  },
+});
+
+const wsClient = new Lark.WSClient({
+  appId,
+  appSecret,
+  loggerLevel: Lark.LoggerLevel.info,
+});
+
+wsClient.start({ eventDispatcher: dispatcher });
